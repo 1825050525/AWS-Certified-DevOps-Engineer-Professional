@@ -374,3 +374,34 @@ Config（restricted-ssh 違反）
 ### 覚え方
 > **「未然に防ぐ」→ プロアクティブ、「検出して通知」→ ディテクティブ（Config）**  
 > CloudFormation で作るリソースを作成前に検証 → CloudFormation フック
+
+---
+
+## 問題37（P2）：SCP による IP アドレスベースの AWS API 制御 ⭐ 難易度：中
+**結果：不正解**
+
+### 一言でいうと
+「指定範囲外のIPからのAWS APIアクションをブロック = SCPでDeny ＋ 組織ルートに適用」
+
+### カテゴリ別ポイント
+
+#### SCP vs Firewall Manager の役割（ここで選択ミス）
+```
+SCP（Service Control Policy）✅
+  → AWS APIアクション（コンソール・CLI・SDK）を制御
+  → aws:SourceIp 条件でIPアドレスベースの制御が可能
+
+Firewall Manager / Network Firewall ❌
+  → VPC内外のネットワークトラフィック（パケットレベル）を制御
+  → AWS APIの呼び出し自体は制御できない
+```
+
+#### Deny vs Allow どちらを使うか
+```
+✅ 範囲外を Deny → 他のポリシーで上書き不可。確実にブロック
+❌ 範囲内のみ Allow → 他のIAMポリシーで上書きされる可能性あり
+```
+
+### 覚え方
+> **「AWSアカウントでのアクションをブロック → SCP」「VPCトラフィックをブロック → Network Firewall」**  
+> SCP の明示的 Deny は最強（IAMポリシーでも上書き不可）
