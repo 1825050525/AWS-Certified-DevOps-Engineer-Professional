@@ -159,3 +159,218 @@ Config カスタムルール（定期実行）
 ### 覚え方
 > **Config ルールの組織管理 = コンフォーマンスパック ＋ 委任管理者の Config ネイティブ配布**  
 > StackSets は「Config に配布機能がない時の代替手段」。Config には既にある
+
+---
+
+## 問題49：セキュリティグループ SSH 無制限許可の検知（Config restricted-ssh） ⭐ 難易度：中
+**結果：正解**
+
+### 一言でいうと
+「SSH 0.0.0.0/0 を検知 → Config の `restricted-ssh` マネージドルール一択」
+
+### カテゴリ別ポイント
+
+#### なぜ EventBridge + CloudTrail だけでは不十分か
+```
+EventBridge（AuthorizeSecurityGroupIngress）
+  → 「誰かがインバウンドルールを追加した」は検知できる
+  → でも「ポート22 ＋ 0.0.0.0/0 かどうか」は判定できない
+  → 偽陽性が大量発生
+
+Config restricted-ssh ルール
+  → セキュリティグループの設定内容を直接評価
+  → ポート22が0.0.0.0/0から許可されているか自動判定
+  → 違反時 → NON_COMPLIANT → SNS通知
+```
+
+#### 他サービスが不適切な理由
+| サービス | なぜダメ |
+|---|---|
+| GuardDuty + Security Hub | 動的な脅威検出専用。設定の静的監視は対象外 |
+| Amazon Inspector | EC2インスタンス内の脆弱性スキャン。セキュリティグループは対象外 |
+
+### 覚え方
+> 「SSH無制限許可を検知」→ Config `restricted-ssh`（マネージドルールで一発）  
+> EventBridgeは「変更があった」を検知するだけ。「何の変更か」は Config が評価する
+
+---
+
+## 問題51：Config 違反通知（EventBridge 入力変換 ＋ SNS） ⭐⭐ 難易度：中
+**結果：不正解**
+
+### 一言でいうと
+「Config 違反通知 = EventBridge で特定ルールに絞り ＋ 入力変換でメッセージ整形 → SNS」
+
+### カテゴリ別ポイント
+
+#### 正しいフロー
+```
+Config（restricted-ssh 違反）
+  → EventBridge（restricted-ssh の NON_COMPLIANT のみに絞る）
+  → 入力変換（SG名・IDを含むメッセージに整形）
+  → SNS → 受信者へ通知
+```
+
+#### 間違えたポイント
+```
+❌ 全 NON_COMPLIANT を拾う
+   → restricted-ssh 以外の無関係な違反も通知が飛ぶ
+
+✅ restricted-ssh ルール専用でフィルタ
+   → 必要な違反だけを確実にキャプチャ
+```
+
+#### 入力変換（Input Transformation）
+- EventBridge の標準機能でイベントの JSON を整形できる
+- SGの名前・IDなど必要な情報だけを抽出してメッセージに含める
+- SNS フィルターポリシーは**選別はできるが整形はできない** → 要件を満たせない
+
+### 罠
+| 選択肢 | なぜ間違い |
+|---|---|
+| Config → SNS 直接通知 | Config はSNSへ直接通知する機能を持たない |
+| 全 NON_COMPLIANT をキャプチャ | 無関係なルール違反も拾ってしまう |
+| Run Command 経由で SNS 転送 | Run Command は EC2 コマンド実行用。通知パイプラインには不適切 |
+
+### 覚え方
+> **「Config 違反通知 = EventBridge（特定ルールに絞る）＋ 入力変換（整形）＋ SNS」**  
+> 「全部拾う」より「必要なものだけ絞る」のが正解
+
+---
+
+## 問題52：ハードコーディングされた認証情報の検出と置き換え ⭐ 難易度：中
+**結果：正解**
+
+### 一言でいうと
+「コードの秘密情報を自動検出 = CodeGuru Reviewer、保管 = Secrets Manager」
+
+### カテゴリ別ポイント
+
+#### CodeGuru の2種類（ここが罠）
+| サービス | 役割 |
+|---|---|
+| **CodeGuru Reviewer** ✅ | 静的コード解析。ハードコーディングされた認証情報を検出 |
+| CodeGuru Profiler ❌ | 実行時パフォーマンス分析（CPU・メモリ）。静的問題は検出不可 |
+
+#### Secrets Manager vs Parameter Store
+| | Secrets Manager ✅ | Parameter Store |
+|---|---|---|
+| 用途 | DB認証情報・APIキー専用 | 設定値・フラグ管理 |
+| 自動ローテーション | あり（RDS統合） | なし |
+
+### 覚え方
+> **「Reviewer = コードを読む、Profiler = 動きを見る」**  
+> **「DB認証情報 → Secrets Manager」「設定値 → Parameter Store」**
+
+---
+
+## 問題54：クロスアカウント IAM アクセス（STS AssumeRole） ⭐ 難易度：中
+**結果：正解**
+
+### 一言でいうと
+「管理アカウントから呼ぶ → 管理側に AssumeRole 許可 ＋ メンバー側に信頼ポリシー ＋ EC2読み取り権限」
+
+### カテゴリ別ポイント
+
+#### 必須の3点セット
+```
+✅ 管理アカウント：IAMロールに sts:AssumeRole → メンバーのロールARN を許可
+✅ メンバーアカウント：信頼ポリシーで管理アカウントがロールを引き受けてよいと設定
+✅ メンバーアカウント：AmazonEC2ReadOnlyAccess を付与
+```
+
+#### よくある方向性ミス
+```
+❌ 「メンバーが管理アカウントのロールを引き受ける」→ 向きが逆
+❌ 「管理アカウントに EC2ReadOnly だけ付与」→ アカウント境界を越えられない
+```
+
+### 覚え方
+> **「行く側（管理）に AssumeRole 許可、来られる側（メンバー）に信頼ポリシー ＋ 権限」**  
+> クロスアカウントは3点セットで設定する
+
+---
+
+## 問題7（P2）：CFN専用ロールの設定（PassRole vs AssumeRole） ⭐⭐ 難易度：高
+**結果：不正解**
+
+### 一言でいうと
+「開発者はCFNにロールを"渡す"だけ（PassRole）。引き受けるのはCloudFormationサービス」
+
+### カテゴリ別ポイント
+
+#### 信頼ポリシーのPrincipalを誰にするか（ここで選択ミス）
+```
+❌ 開発者IAMロールが引き受けられる設定
+  → 開発者が直接ロールを引き受け → CFN以外にも使える → 要件違反
+
+✅ cloudformation.amazonaws.com が引き受けられる設定
+  → CloudFormationサービスだけが引き受け可能
+  → 開発者はCFN経由でのみ利用できる
+```
+
+#### 開発者に必要な権限
+```
+✅ ReadOnlyAccess（直接リソース変更を防止）
+✅ cloudformation:CreateStack / UpdateStack 等
+✅ iam:PassRole（passedToService = cloudformation.amazonaws.com のみ）
+```
+
+### 覚え方
+> **「CFNDeploymentロールのPrincipal = cloudformation.amazonaws.com（開発者ではない）」**  
+> 開発者は PassRole で CFN にロールを渡すだけ。自分で引き受けない
+
+---
+
+## 問題8（P2）：Organizations CreateAccount のクロスアカウントアクセス ⭐⭐ 難易度：高
+**結果：不正解**
+
+### 一言でいうと
+「organizations:CreateAccount は委任管理不可 → 管理アカウントのIAMロールをクロスアカウントで引き受ける」
+
+### カテゴリ別ポイント
+
+#### Organizations 委任管理の制限（ここが落とし穴）
+```
+委任管理できる：Config / Security Hub / GuardDuty などの管理
+委任管理できない：organizations:CreateAccount（アカウント作成）
+→ CreateAccount は管理アカウントからしか実行できない
+→ クロスアカウントIAMロールで解決
+```
+
+#### 信頼ポリシーのPrincipal
+```
+❌ lambda.amazonaws.com → 任意のアカウントのLambdaが引き受け可能（リスク）
+✅ 専用アカウントのLambda実行ロールARN → 特定ロールのみに制限（安全）
+```
+
+### 覚え方
+> **「Organizations委任管理 = CreateAccount は対象外」**  
+> 信頼ポリシーのPrincipalにはサービスプリンシパルではなく特定のロールARNを指定する
+
+---
+
+## 問題11（P2）：Control Tower プロアクティブ vs ディテクティブコントロール ⭐ 難易度：中
+**結果：不正解**
+
+### 一言でいうと
+「未然に防ぐ = プロアクティブコントロール（CloudFormation フックで作成前に検証）」
+
+### カテゴリ別ポイント
+
+#### Control Tower コントロールの2種類
+| コントロール | タイミング | 仕組み | 阻止できるか |
+|---|---|---|---|
+| **プロアクティブ** ✅ | 作成"前" | CloudFormation フック | できる |
+| ディテクティブ ❌ | 作成"後" | Config / CloudTrail | できない（検出のみ） |
+
+### 罠
+| 選択肢 | なぜダメ |
+|---|---|
+| Config ルール | 事後検出のみ。バケットは既に作られる |
+| SCP | APIアクション制御はできるがバケット設定内容の詳細検証は困難 |
+| ディテクティブコントロール | 検出はできるが阻止できない |
+
+### 覚え方
+> **「未然に防ぐ」→ プロアクティブ、「検出して通知」→ ディテクティブ（Config）**  
+> CloudFormation で作るリソースを作成前に検証 → CloudFormation フック
